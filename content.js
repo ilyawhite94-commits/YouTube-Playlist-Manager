@@ -63,7 +63,7 @@ section{padding:12px 16px;overflow:auto}
 .lg{display:grid;grid-template-columns:repeat(auto-fill,minmax(440px,1fr));gap:12px}
 .lg .card{flex-direction:column;align-items:stretch;gap:10px;margin-bottom:0;padding:12px 14px}
 .cm{min-width:0;display:flex;flex-direction:column;gap:4px}
-.pv{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;gap:6px}
+.pv{display:grid;gap:6px}
 .pv img,.pv i{width:100%;aspect-ratio:4/3;border-radius:8px;object-fit:cover;background:var(--hov);display:block}
 #x{font-size:30px;line-height:1;padding:10px 24px}
 .pbar button[data-a="back"]{font-size:20px;font-weight:500;padding:12px 26px}
@@ -213,8 +213,9 @@ section{padding:12px 16px;overflow:auto}
 
   function pvHtml(p) {
     const ids = p.pv || [];
-    let h = `<div class="pv" data-pl="${p.id}"${(p.pvv || 0) >= PREVIEWS ? '' : ' data-need="1"'}>`;
-    for (let i = 0; i < PREVIEWS; i++) h += ids[i] ? `<img draggable="false" loading="lazy" src="https://i.ytimg.com/vi/${ids[i]}/mqdefault.jpg" alt="">` : '<i></i>';
+    const done = (p.pvv || 0) >= PREVIEWS;
+    let h = `<div class="pv" data-pl="${p.id}"${done ? '' : ' data-need="1"'} style="grid-template-columns:repeat(${PREVIEWS},1fr)">`;
+    for (let i = 0; i < (done ? ids.length : PREVIEWS); i++) h += ids[i] ? `<img draggable="false" loading="lazy" src="https://i.ytimg.com/vi/${ids[i]}/mqdefault.jpg" alt="">` : '<i></i>';
     return h + '</div>';
   }
 
@@ -233,11 +234,16 @@ section{padding:12px 16px;overflow:auto}
       pvFetch(l).finally(() => { pvBusy--; pvPump(); });
     }
   }
+  const pvFail = {};
+  function pvRetry(l) {
+    pvFail[l.l] = (pvFail[l.l] || 0) + 1;
+    if (pvFail[l.l] <= 3) setTimeout(() => { pvTried.delete(l.l); pvEnqueue(l); }, 6000 * pvFail[l.l]);
+  }
   async function pvFetch(l) {
     try {
       const html = await (await fetch('/playlist?list=' + encodeURIComponent(l.l) + '&hl=ru', { credentials: 'include' })).text();
       const m = html.match(/ytInitialData["\]]*\s*=\s*(\{.+?\});\s*<\/script>/s);
-      if (!m) return;
+      if (!m) { pvRetry(l); return; }
       const ids = [];
       (function walk(o) {
         if (!o || typeof o !== 'object' || ids.length >= PREVIEWS) return;
@@ -250,7 +256,7 @@ section{padding:12px 16px;overflow:auto}
       save();
       const e = root.querySelector('.pv[data-pl="' + l.id + '"]');
       if (e) e.outerHTML = pvHtml(l);
-    } catch (e) {}
+    } catch (e) { pvRetry(l); }
   }
   const pvObs = new IntersectionObserver((es) => {
     es.forEach((e) => {
