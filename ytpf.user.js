@@ -2,7 +2,7 @@
 // @name         Папки для плейлистов YouTube
 // @name:en      YouTube Playlist Folders
 // @namespace    ytpf
-// @version      1.0.1
+// @version      1.0.3
 // @description  Группируйте плейлисты YouTube по папкам: превью, список видео в окне, перетаскивание. Кнопка появляется в правом нижнем углу.
 // @description:en  Group your YouTube playlists into folders with previews and an in-window video list. Hover the bottom-right corner to open.
 // @match        https://www.youtube.com/*
@@ -170,17 +170,68 @@ section{padding:12px 16px;overflow:auto}
     return `<a class="vc${it.ok ? '' : ' off'}" href="/watch?v=${it.id}&list=${encodeURIComponent(v.l)}&index=${it.i}"><div class="th"><img loading="lazy" src="https://i.ytimg.com/vi/${it.id}/mqdefault.jpg" alt="">${it.d ? `<span class="du">${esc(it.d)}</span>` : ''}</div><div class="vt">${esc(it.t)}</div><div class="m">${esc(it.c)}</div></a>`;
   }
 
+  const deep = (o, key) => {
+    if (!o || typeof o !== 'object') return undefined;
+    if (o[key] !== undefined) return o[key];
+    for (const k in o) { const r = deep(o[k], key); if (r !== undefined) return r; }
+    return undefined;
+  };
+  const txt = (x) => (x ? (typeof x === 'string' ? x : x.simpleText || (x.runs ? x.runs.map((r) => r.text).join('') : '') || x.content || '') : '');
+
+  // YouTube отдаёт видео в разных форматах: старом (…Renderer) и новом (lockupViewModel)
+  function pickVideo(o) {
+    const r = o.playlistVideoRenderer || o.playlistPanelVideoRenderer || o.videoRenderer || o.gridVideoRenderer || o.compactVideoRenderer;
+    if (r && r.videoId) {
+      return { id: r.videoId, t: txt(r.title), c: txt(r.shortBylineText || r.longBylineText || r.ownerText), d: txt(r.lengthText), ok: r.isPlayable !== false };
+    }
+    const lv = o.lockupViewModel;
+    if (lv && lv.contentId && /VIDEO/.test(lv.contentType || '')) {
+      const md = lv.metadata && lv.metadata.lockupMetadataViewModel;
+      const parts = deep(md, 'metadataParts');
+      const badge = deep(lv.contentImage, 'thumbnailBadgeViewModel');
+      return { id: lv.contentId, t: txt(md && md.title), c: parts && parts[0] ? txt(parts[0].text) : '', d: badge ? txt(badge.text) : '', ok: true };
+    }
+    return null;
+  }
+
+  function collect(data, max) {
+    const out = [];
+    (function walk(o) {
+      if (!o || typeof o !== 'object' || out.length >= max) return;
+      const it = pickVideo(o);
+      if (it) { out.push(it); return; }
+      for (const k in o) walk(o[k]);
+    })(data);
+    return out;
+  }
+
+  async function getPlaylistData(id) {
+    const html = await (await fetch('/playlist?list=' + encodeURIComponent(id) + '&hl=ru', { credentials: 'include' })).text();
+    const key = (html.match(/"INNERTUBE_API_KEY":"([^"]+)"/) || [])[1];
+    const ver = (html.match(/"INNERTUBE_CLIENT_VERSION":"([^"]+)"/) || [])[1] || '2.20250101.00.00';
+    let data = null;
+    const m = html.match(/ytInitialData["\]]*\s*=\s*(\{.+?\});\s*<\/script>/s);
+    if (m) { try { data = JSON.parse(m[1]); } catch (e) {} }
+    return { data, key, ver, len: html.length };
+  }
+
+  async function browseApi(body, key, ver) {
+    const resp = await fetch('/youtubei/v1/browse?prettyPrint=false' + (key ? '&key=' + key : ''), {
+      method: 'POST',
+      credentials: 'include',
+      headers: Object.assign({ 'Content-Type': 'application/json' }, await authHeaders()),
+      body: JSON.stringify(Object.assign({ context: { client: { clientName: 'WEB', clientVersion: ver, hl: 'ru' } } }, body)),
+    });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    return resp.json();
+  }
+
   function takeVideos(v, data) {
+    const fresh = collect(data, Infinity);
+    fresh.forEach((it, i) => { it.i = v.items.length + i + 1; });
     let token = null;
-    const fresh = [];
     (function walk(o) {
       if (!o || typeof o !== 'object') return;
-      const r = o.playlistVideoRenderer;
-      if (r && r.videoId) {
-        const t = r.title ? (r.title.simpleText || (r.title.runs || []).map((x) => x.text).join('')) : '';
-        const c = r.shortBylineText && r.shortBylineText.runs && r.shortBylineText.runs[0] ? r.shortBylineText.runs[0].text : '';
-        fresh.push({ id: r.videoId, t, c, d: r.lengthText ? r.lengthText.simpleText || '' : '', ok: r.isPlayable !== false, i: v.items.length + fresh.length + 1 });
-      }
       const ci = o.continuationItemRenderer;
       if (ci && ci.continuationEndpoint && ci.continuationEndpoint.continuationCommand) token = ci.continuationEndpoint.continuationCommand.token;
       for (const k in o) walk(o[k]);
@@ -196,32 +247,31 @@ section{padding:12px 16px;overflow:auto}
   }
 
   async function loadPlaylist(v) {
+    const dbg = [];
     let failed = false;
     try {
-      const html = await (await fetch('/playlist?list=' + encodeURIComponent(v.l) + '&hl=ru', { credentials: 'include' })).text();
-      const m = html.match(/ytInitialData["\]]*\s*=\s*(\{.+?\});\s*<\/script>/s);
-      if (!m) throw new Error('no data');
-      const key = (html.match(/"INNERTUBE_API_KEY":"([^"]+)"/) || [])[1];
-      const ver = (html.match(/"INNERTUBE_CLIENT_VERSION":"([^"]+)"/) || [])[1] || '2.20250101.00.00';
-      let token = takeVideos(v, JSON.parse(m[1]));
-      while (token && view === v && v.items.length < 3000) {
-        const resp = await fetch('/youtubei/v1/browse?prettyPrint=false' + (key ? '&key=' + key : ''), {
-          method: 'POST',
-          credentials: 'include',
-          headers: Object.assign({ 'Content-Type': 'application/json' }, await authHeaders()),
-          body: JSON.stringify({ context: { client: { clientName: 'WEB', clientVersion: ver, hl: 'ru' } }, continuation: token }),
-        });
-        if (!resp.ok) break;
-        token = takeVideos(v, await resp.json());
+      const g = await getPlaylistData(v.l);
+      dbg.push('страница ' + Math.round(g.len / 1000) + ' КБ, данные ' + (g.data ? 'есть' : 'нет'));
+      let token = g.data ? takeVideos(v, g.data) : null;
+      dbg.push('видео на странице: ' + v.items.length);
+      if (!v.items.length && view === v) {
+        try {
+          token = takeVideos(v, await browseApi({ browseId: 'VL' + v.l }, g.key, g.ver));
+          dbg.push('видео через API: ' + v.items.length);
+        } catch (e) { dbg.push('API: ' + e.message); }
       }
-    } catch (e) { failed = true; }
+      while (token && view === v && v.items.length < 3000) {
+        token = takeVideos(v, await browseApi({ continuation: token }, g.key, g.ver));
+      }
+    } catch (e) { failed = true; dbg.push('ошибка: ' + e.message); }
     v.done = true;
     if (view !== v) return;
     const st = $('#vst'); if (st) st.textContent = v.items.length + ' видео';
     const msg = $('#vmsg');
     if (msg) {
-      if (!v.items.length) { msg.hidden = false; msg.textContent = failed ? 'Не удалось загрузить список видео. Откройте плейлист на YouTube.' : 'В плейлисте нет видео или он недоступен.'; }
-      else if (failed) { msg.hidden = false; msg.textContent = 'Список загружен не полностью.'; }
+      const info = ' [' + dbg.join('; ') + ']';
+      if (!v.items.length) { msg.hidden = false; msg.textContent = (failed ? 'Не удалось загрузить список видео. ' : 'В плейлисте нет видео или он недоступен. ') + 'Откройте плейлист на YouTube.' + info; }
+      else if (failed) { msg.hidden = false; msg.textContent = 'Список загружен не полностью.' + info; }
     }
   }
 
@@ -235,10 +285,11 @@ section{padding:12px 16px;overflow:auto}
   }
 
   const PREVIEWS = 4;
+  const PV_VER = 5; // увеличивайте, когда меняется разбор данных: кэш превью перезагрузится
 
   function pvHtml(p) {
     const ids = p.pv || [];
-    const done = (p.pvv || 0) >= PREVIEWS;
+    const done = (p.pvv || 0) >= PV_VER;
     let h = `<div class="pv" data-pl="${p.id}"${done ? '' : ' data-need="1"'} style="grid-template-columns:repeat(${PREVIEWS},1fr)">`;
     for (let i = 0; i < (done ? ids.length : PREVIEWS); i++) h += ids[i] ? `<img draggable="false" loading="lazy" src="https://i.ytimg.com/vi/${ids[i]}/mqdefault.jpg" alt="">` : '<i></i>';
     return h + '</div>';
@@ -247,7 +298,7 @@ section{padding:12px 16px;overflow:auto}
   const pvQ = [], pvTried = new Set();
   let pvBusy = 0;
   function pvEnqueue(l) {
-    if (pvTried.has(l.l) || (l.pvv || 0) >= PREVIEWS) return;
+    if (pvTried.has(l.l) || (l.pvv || 0) >= PV_VER) return;
     pvTried.add(l.l);
     pvQ.push(l);
     pvPump();
@@ -266,18 +317,12 @@ section{padding:12px 16px;overflow:auto}
   }
   async function pvFetch(l) {
     try {
-      const html = await (await fetch('/playlist?list=' + encodeURIComponent(l.l) + '&hl=ru', { credentials: 'include' })).text();
-      const m = html.match(/ytInitialData["\]]*\s*=\s*(\{.+?\});\s*<\/script>/s);
-      if (!m) { pvRetry(l); return; }
-      const ids = [];
-      (function walk(o) {
-        if (!o || typeof o !== 'object' || ids.length >= PREVIEWS) return;
-        const r = o.playlistVideoRenderer;
-        if (r && r.videoId) ids.push(r.videoId);
-        for (const k in o) walk(o[k]);
-      })(JSON.parse(m[1]));
-      l.pv = ids;
-      l.pvv = PREVIEWS;
+      const g = await getPlaylistData(l.l);
+      let ids = g.data ? collect(g.data, PREVIEWS) : [];
+      if (!ids.length) { try { ids = collect(await browseApi({ browseId: 'VL' + l.l }, g.key, g.ver), PREVIEWS); } catch (e) {} }
+      if (!g.data && !ids.length) { pvRetry(l); return; }
+      l.pv = ids.map((x) => x.id);
+      l.pvv = PV_VER;
       save();
       const e = root.querySelector('.pv[data-pl="' + l.id + '"]');
       if (e) e.outerHTML = H(pvHtml(l));
