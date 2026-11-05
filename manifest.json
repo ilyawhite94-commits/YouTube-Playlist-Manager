@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "Папки для плейлистов YouTube",
+  "version": "1.0",
+  "description": "Группируйте плейлисты YouTube по папкам прямо на вкладке «Плейлисты».",
+  "permissions": ["storage"],
+  "content_scripts": [
+    {
+      "matches": ["https://www.youtube.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
