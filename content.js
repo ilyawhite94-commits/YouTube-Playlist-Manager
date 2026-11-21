@@ -26,13 +26,11 @@ button:hover{background:var(--hov)}
 .pri{background:var(--acc);color:var(--accink);border-color:var(--acc);font-weight:500}
 .pri:hover{background:var(--acc);opacity:.9}
 input,select,textarea{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:6px 8px;max-width:100%}
-#zone{position:fixed;right:0;bottom:0;width:260px;height:120px;z-index:2147483000;display:flex;align-items:flex-end;justify-content:flex-end;gap:10px;padding:16px;background:transparent}
-#zone.wide{width:560px}
-#fab,#nbtn{background:var(--hov);color:var(--ink);box-shadow:0 4px 16px rgba(0,0,0,.45);opacity:0;transform:scale(.9);transition:opacity .15s,transform .15s}
-#fab{font-size:28px;padding:20px 40px;border-radius:50px}
-#nbtn{font-size:22px;padding:16px 28px;border-radius:50px}
-#zone:hover #fab,#zone:hover #nbtn{opacity:1;transform:scale(1)}
-#fab:hover,#nbtn:hover{background:var(--line)}
+#zone{position:fixed;right:0;bottom:24px;z-index:2147483000;display:flex;flex-direction:column;align-items:flex-end;gap:10px;pointer-events:none}
+#fab,#nbtn{pointer-events:auto;background:var(--hov);color:var(--ink);border:1px solid var(--line);border-right:0;border-radius:40px 0 0 40px;box-shadow:0 4px 16px rgba(0,0,0,.4);transform:translateX(calc(100% - 14px));transition:transform .18s ease,background .15s}
+#fab{font-size:28px;padding:18px 36px 18px 26px}
+#nbtn{font-size:22px;padding:14px 30px 14px 22px}
+#fab:hover,#nbtn:hover{transform:translateX(0);background:var(--line)}
 #pill{position:fixed;top:72px;right:24px;z-index:2147483000;background:var(--bg);border:1px solid var(--line);border-radius:20px;padding:6px 8px 6px 14px;box-shadow:0 2px 10px rgba(0,0,0,.35);font-size:14px;display:flex;align-items:center;gap:8px}
 #pill button{border-radius:50%;padding:2px 8px}
 #ov{position:fixed;inset:0;z-index:2147483001;background:rgba(0,0,0,.55);display:flex;align-items:flex-end;justify-content:center;padding-bottom:3vh}
@@ -216,14 +214,16 @@ section{padding:12px 16px;overflow:auto}
   function pickVideo(o) {
     const r = o.playlistVideoRenderer || o.playlistPanelVideoRenderer || o.videoRenderer || o.gridVideoRenderer || o.compactVideoRenderer;
     if (r && r.videoId) {
-      return { id: r.videoId, t: txt(r.title), c: txt(r.shortBylineText || r.longBylineText || r.ownerText), d: txt(r.lengthText), ok: r.isPlayable !== false };
+      return { id: r.videoId, t: txt(r.title), c: txt(r.shortBylineText || r.longBylineText || r.ownerText), d: txt(r.lengthText), m: [txt(r.publishedTimeText), txt(r.viewCountText)].filter(Boolean).join(' · '), ok: r.isPlayable !== false };
     }
     const lv = o.lockupViewModel;
     if (lv && lv.contentId && /VIDEO/.test(lv.contentType || '')) {
       const md = lv.metadata && lv.metadata.lockupMetadataViewModel;
       const parts = deep(md, 'metadataParts');
       const badge = deep(lv.contentImage, 'thumbnailBadgeViewModel');
-      return { id: lv.contentId, t: txt(md && md.title), c: parts && parts[0] ? txt(parts[0].text) : '', d: badge ? txt(badge.text) : '', ok: true };
+      const rows = deep(md, 'metadataRows');
+      const mm = Array.isArray(rows) ? rows.map((rw) => (rw.metadataParts || []).map((p) => txt(p.text)).filter(Boolean).join(' · ')).filter(Boolean).join(' · ') : '';
+      return { id: lv.contentId, t: txt(md && md.title), c: parts && parts[0] ? txt(parts[0].text) : '', d: badge ? txt(badge.text) : '', m: mm, ok: true };
     }
     return null;
   }
@@ -259,7 +259,7 @@ section{padding:12px 16px;overflow:auto}
 
   // ---------- вкладка «Плейлисты»: загрузка списка видео ----------
   function vcard(v, it) {
-    return `<a class="vc${it.ok ? '' : ' off'}" href="/watch?v=${it.id}&list=${encodeURIComponent(v.l)}&index=${it.i}"><div class="th"><img loading="lazy" src="https://i.ytimg.com/vi/${it.id}/mqdefault.jpg" alt="">${it.d ? `<span class="du">${esc(it.d)}</span>` : ''}</div><div class="vt">${esc(it.t)}</div><div class="m">${esc(it.c)}</div></a>`;
+    return `<a class="vc${it.ok ? '' : ' off'}" href="/watch?v=${it.id}${v.l ? '&list=' + encodeURIComponent(v.l) + '&index=' + it.i : ''}"><div class="th"><img loading="lazy" src="https://i.ytimg.com/vi/${it.id}/mqdefault.jpg" alt="">${it.d ? `<span class="du">${esc(it.d)}</span>` : ''}</div><div class="vt">${esc(it.t)}</div><div class="m">${esc(v.l ? it.c : (it.m || ''))}</div></a>`;
   }
 
   function takeVideos(v, data) {
@@ -313,6 +313,56 @@ section{padding:12px 16px;overflow:auto}
     const id = encodeURIComponent(l.l);
     setHtml($('#cards'), `<div class="pbar"><button data-a="back">← К списку</button><b>${esc(l.t)}</b><span class="m" id="vst"></span><a href="/playlist?list=${id}">Открыть на YouTube</a></div><div class="vg"></div><div class="empty" id="vmsg">Загружаю список видео…</div>`);
     loadPlaylist(v);
+  }
+
+  async function pump(v, upto) {
+    while (v.token && view === v && v.items.length < upto) {
+      v.token = takeVideos(v, await browseApi({ continuation: v.token }, v.key, v.ver));
+    }
+  }
+
+  function finishChannel(v, failed, dbg) {
+    v.done = true;
+    if (view !== v) return;
+    const st = $('#vst'); if (st) st.textContent = v.items.length + ' видео' + (v.token ? ' (загружены не все)' : '');
+    const more = $('#vmore'); if (more) more.hidden = !v.token;
+    const msg = $('#vmsg');
+    if (msg) {
+      const info = dbg.length ? ' [' + dbg.join('; ') + ']' : '';
+      if (!v.items.length) { msg.hidden = false; msg.textContent = (failed ? 'Не удалось загрузить видео канала. ' : 'Видео на канале не найдены. ') + 'Откройте канал на YouTube.' + info; }
+      else if (failed) { msg.hidden = false; msg.textContent = 'Список загружен не полностью.' + info; }
+    }
+  }
+
+  async function loadChannel(v) {
+    const ch = v.ch, dbg = [];
+    let failed = false;
+    try {
+      const g = await getPage((ch.h ? '/' + ch.h : '/channel/' + ch.c) + '/videos?hl=ru');
+      v.key = g.key; v.ver = g.ver;
+      dbg.push('страница ' + Math.round(g.len / 1000) + ' КБ, данные ' + (g.data ? 'есть' : 'нет'));
+      if (g.data && !ch.c) { const ext = deep(g.data, 'externalId'); if (ext) { ch.c = ext; save(); } }
+      v.token = g.data ? takeVideos(v, g.data) : null;
+      dbg.push('видео на странице: ' + v.items.length);
+      if (!v.items.length && ch.c && view === v) {
+        try {
+          v.token = takeVideos(v, await browseApi({ browseId: ch.c, params: 'EgZ2aWRlb3PyBgQKAjoA' }, v.key, v.ver));
+          dbg.push('видео через API: ' + v.items.length);
+        } catch (e) { dbg.push('API: ' + e.message); }
+      }
+      await pump(v, 200);
+    } catch (e) { failed = true; dbg.push('ошибка: ' + e.message); }
+    finishChannel(v, failed, dbg);
+  }
+
+  function openChannelView(ch) {
+    const v = { l: '', t: ch.t, ch, items: [], done: false, token: null };
+    view = v;
+    $('#q').hidden = true;
+    $('#tools').hidden = true;
+    const href = ch.h ? '/' + ch.h : '/channel/' + ch.c;
+    setHtml($('#cards'), `<div class="pbar"><button data-a="back">← К списку</button><b>${esc(ch.t)}</b><span class="m" id="vst"></span><a href="${esc(href)}">Открыть канал на YouTube</a></div><div class="vg"></div><div class="empty" id="vmsg">Загружаю видео канала…</div><div class="nrow"><button data-a="more" id="vmore" hidden>Загрузить ещё</button></div>`);
+    loadChannel(v);
   }
 
   // ---------- превью плейлистов ----------
@@ -628,7 +678,7 @@ section{padding:12px 16px;overflow:auto}
     let L = S.chans;
     if (sel === 'none') L = L.filter((c) => !c.f); else if (real) { const s = ids(sel); L = L.filter((c) => s.includes(c.f)); }
     if (q) L = L.filter((c) => (c.t + ' ' + c.h).toLowerCase().includes(q));
-    const card = (ch) => `<div class="cc" draggable="true" data-id="${ch.id}" title="Открыть канал">` +
+    const card = (ch) => `<div class="cc" draggable="true" data-id="${ch.id}" title="Показать видео канала">` +
       (ch.img ? `<img class="av" draggable="false" loading="lazy" src="${esc(ch.img)}" alt="">` : '<i class="av"></i>') +
       `<div class="cm"><b class="ct">${esc(ch.t)}</b><div class="m">${esc(ch.h || '')}</div><div class="m">${esc(path(ch.f) || 'Без папки')}</div></div></div>`;
     setHtml($('#cards'), L.length ? '<div class="cg">' + L.map(card).join('') + '</div>'
@@ -653,7 +703,7 @@ section{padding:12px 16px;overflow:auto}
     $('#rs').textContent = mode === 'c' ? 'Обновить подписки' : 'Обновить со страницы';
     $('#crumb').textContent = mode === 'n' ? (sel.startsWith('#') ? 'Метка: ' + sel.slice(1) : 'Все заметки')
       : sel === 'all' ? (mode === 'c' ? 'Все каналы' : 'Все плейлисты') : sel === 'none' ? 'Без папки' : path(sel);
-    if ((mode === 'p' && view) || (mode === 'n' && ne)) { $('#q').hidden = true; $('#tools').hidden = true; focusRi(); return; }
+    if ((mode !== 'n' && view) || (mode === 'n' && ne)) { $('#q').hidden = true; $('#tools').hidden = true; focusRi(); return; }
     $('#q').hidden = false;
     renderTools();
     if (mode === 'p') renderLists(); else if (mode === 'c') renderChans(); else renderNotes();
@@ -717,6 +767,7 @@ section{padding:12px 16px;overflow:auto}
       save(); render();
     }
     else if (a === 'back') { view = null; render(); }
+    else if (a === 'more') { const v = view; if (!v || !v.token) return; b.hidden = true; v.done = false; pump(v, v.items.length + 200).catch(() => {}).then(() => finishChannel(v, false, [])); }
     else if (a === 'ff') { S.feedFilter = sel; save(); applyFeedFilter(); render(); $('#st').textContent = 'Откройте «Подписки» на YouTube: лента покажет только эту папку'; }
     else if (a === 'fx') { S.feedFilter = null; save(); applyFeedFilter(); render(); sync(); }
     else if (a === 'nnew') { const i = videoInfo(); if (i) { const ex = S.notes[i.id]; openEditor({ id: i.id, t: i.t || i.id, c: i.c, tags: ex ? ex.tags || [] : [], text: ex ? ex.text || '' : '' }); } }
@@ -761,7 +812,7 @@ section{padding:12px 16px;overflow:auto}
     const cc = t.closest('.cc');
     if (cc) {
       const ch = S.chans.find((x) => x.id === cc.dataset.id);
-      if (ch) location.href = ch.h ? '/' + ch.h : '/channel/' + ch.c;
+      if (ch) openChannelView(ch);
       return;
     }
     const row = t.closest('.row[data-id]');
