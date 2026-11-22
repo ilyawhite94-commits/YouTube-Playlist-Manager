@@ -2,7 +2,7 @@
 // @name         Папки для плейлистов YouTube
 // @name:en      YouTube Playlist Folders
 // @namespace    ytpf
-// @version      1.2.1
+// @version      1.3.0
 // @description  Папки для плейлистов и подписок YouTube, фильтр ленты, заметки к видео и папки в окне «Сохранить в плейлист». Кнопка в правом нижнем углу.
 // @description:en  Folders for YouTube playlists and subscriptions, feed filter, video notes and folders in the Save-to-playlist popup.
 // @match        https://www.youtube.com/*
@@ -31,8 +31,8 @@
   const persist = (s) => { try { GM_setValue(KEY, JSON.stringify(s)); } catch (e) {} };
   const restore = () => Promise.resolve(GM_getValue(KEY, '')).then((raw) => { try { return raw ? JSON.parse(raw) : null; } catch (e) { return null; } });
 
-  let S = { folders: [], lists: [], hidden: [], chans: [], notes: {}, feedFilter: null };
-  let mode = 'p', sel = 'none', ed = null, q = '', open = false, drag = null, view = null, ne = null;
+  let S = { folders: [], lists: [], hidden: [], chans: [], notes: {}, feedFilter: null, feed: {}, vcls: {}, seen: {}, noSb: false };
+  let mode = 'p', sel = 'none', ed = null, q = '', open = false, drag = null, view = null, ne = null, cview = 'ch', fkind = 'all';
   const selStore = { p: 'none', c: 'all', n: 'all' };
   const PREVIEWS = 4;
   const PV_VER = 5; // увеличивайте, когда меняется разбор данных: кэш превью перезагрузится
@@ -124,6 +124,16 @@ section{padding:12px 16px;overflow:auto}
 #ntags,#ntext{width:100%;margin-bottom:10px;font-size:16px}
 #ntext{min-height:260px;resize:vertical}
 .nrow{display:flex;gap:10px;flex-wrap:wrap}
+#sbt{font-size:22px;padding:6px 14px;line-height:1}
+#pn.nosb #body{grid-template-columns:1fr}
+#pn.nosb aside{display:none}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.seg button{border:0;border-radius:0;padding:8px 16px}
+.seg button.on{background:var(--acc);color:var(--accink);font-weight:500}
+.nb2{background:var(--acc);color:var(--accink);border-radius:10px;padding:0 8px;font-size:13px;font-weight:500}
+.newt{position:absolute;left:6px;top:6px;background:var(--acc);color:var(--accink);font-size:12px;font-weight:600;padding:1px 7px;border-radius:6px}
+.vg.sh{grid-template-columns:repeat(auto-fill,minmax(190px,1fr))}
+.vg.sh .th{aspect-ratio:9/16}
 `;
 
   const HTML = `
@@ -133,6 +143,7 @@ section{padding:12px 16px;overflow:auto}
 <div id="ov" hidden>
   <div id="pn">
     <header>
+      <button id="sbt" title="Скрыть или показать боковую панель">☰</button>
       <b>Папки</b>
       <div id="tabs"><button data-tab="p">Плейлисты</button><button data-tab="c">Подписки</button><button data-tab="n">Заметки</button></div>
       <span id="st"></span><button id="rs">Обновить со страницы</button><button id="x" aria-label="Закрыть">✕</button>
@@ -250,6 +261,18 @@ section{padding:12px 16px;overflow:auto}
     return null;
   }
 
+  // Shorts: старый (reelItemRenderer) и новый (shortsLockupViewModel) формат
+  function pickShort(o) {
+    const r = o.reelItemRenderer;
+    if (r && r.videoId) return { id: r.videoId, t: txt(r.headline), c: '', d: '', m: txt(r.viewCountText), ok: true, sh: true };
+    const sv = o.shortsLockupViewModel;
+    if (sv) {
+      const id = deep(sv, 'videoId') || ((sv.entityId || '').match(/([\w-]{11})$/) || [])[1];
+      if (id) { const om = sv.overlayMetadata || {}; return { id, t: txt(om.primaryText), c: '', d: '', m: txt(om.secondaryText), ok: true, sh: true }; }
+    }
+    return null;
+  }
+
   // каналы: старый формат (channelRenderer) и новый (lockupViewModel)
   function pickChannel(o) {
     const r = o.channelRenderer || o.gridChannelRenderer;
@@ -281,11 +304,11 @@ section{padding:12px 16px;overflow:auto}
 
   // ---------- вкладка «Плейлисты»: загрузка списка видео ----------
   function vcard(v, it) {
-    return `<a class="vc${it.ok ? '' : ' off'}" href="/watch?v=${it.id}${v.l ? '&list=' + encodeURIComponent(v.l) + '&index=' + it.i : ''}"><div class="th"><img loading="lazy" src="https://i.ytimg.com/vi/${it.id}/mqdefault.jpg" alt="">${it.d ? `<span class="du">${esc(it.d)}</span>` : ''}</div><div class="vt">${esc(it.t)}</div><div class="m">${esc(v.l ? it.c : (it.m || ''))}</div></a>`;
+    return `<a class="vc${it.ok ? '' : ' off'}" href="${it.sh ? '/shorts/' + it.id : '/watch?v=' + it.id + (v.l ? '&list=' + encodeURIComponent(v.l) + '&index=' + it.i : '')}"><div class="th"><img loading="lazy" src="https://i.ytimg.com/vi/${it.id}/mqdefault.jpg" alt="">${it.d ? `<span class="du">${esc(it.d)}</span>` : ''}</div><div class="vt">${esc(it.t)}</div><div class="m">${esc(v.l ? it.c : (it.m || ''))}</div></a>`;
   }
 
   function takeVideos(v, data) {
-    const fresh = collect(data, Infinity);
+    const fresh = collectBy(v.kind === 's' ? pickShort : pickVideo, data, Infinity);
     fresh.forEach((it, i) => { it.i = v.items.length + i + 1; });
     const token = tokenOf(data);
     v.items = v.items.concat(fresh);
@@ -360,13 +383,13 @@ section{padding:12px 16px;overflow:auto}
     const ch = v.ch, dbg = [];
     let failed = false;
     try {
-      const g = await getPage((ch.h ? '/' + ch.h : '/channel/' + ch.c) + '/videos?hl=ru');
+      const g = await getPage((ch.h ? '/' + ch.h : '/channel/' + ch.c) + (v.kind === 's' ? '/shorts?hl=ru' : '/videos?hl=ru'));
       v.key = g.key; v.ver = g.ver;
       dbg.push('страница ' + Math.round(g.len / 1000) + ' КБ, данные ' + (g.data ? 'есть' : 'нет'));
       if (g.data && !ch.c) { const ext = deep(g.data, 'externalId'); if (ext) { ch.c = ext; save(); } }
       v.token = g.data ? takeVideos(v, g.data) : null;
       dbg.push('видео на странице: ' + v.items.length);
-      if (!v.items.length && ch.c && view === v) {
+      if (!v.items.length && ch.c && view === v && v.kind !== 's') {
         try {
           v.token = takeVideos(v, await browseApi({ browseId: ch.c, params: 'EgZ2aWRlb3PyBgQKAjoA' }, v.key, v.ver));
           dbg.push('видео через API: ' + v.items.length);
@@ -377,13 +400,13 @@ section{padding:12px 16px;overflow:auto}
     finishChannel(v, failed, dbg);
   }
 
-  function openChannelView(ch) {
-    const v = { l: '', t: ch.t, ch, items: [], done: false, token: null };
+  function openChannelView(ch, kind) {
+    const v = { l: '', t: ch.t, ch, items: [], done: false, token: null, kind: kind || 'v' };
     view = v;
     $('#q').hidden = true;
     $('#tools').hidden = true;
     const href = ch.h ? '/' + ch.h : '/channel/' + ch.c;
-    setHtml($('#cards'), `<div class="pbar"><button data-a="back">← К списку</button><b>${esc(ch.t)}</b><span class="m" id="vst"></span><a href="${esc(href)}">Открыть канал на YouTube</a></div><div class="vg"></div><div class="empty" id="vmsg">Загружаю видео канала…</div><div class="nrow"><button data-a="more" id="vmore" hidden>Загрузить ещё</button></div>`);
+    setHtml($('#cards'), `<div class="pbar"><button data-a="back">← К списку</button><b>${esc(ch.t)}</b><div class="seg"><button data-a="ckind" data-k="v" class="${v.kind === 'v' ? 'on' : ''}">Видео</button><button data-a="ckind" data-k="s" class="${v.kind === 's' ? 'on' : ''}">Shorts</button></div><span class="m" id="vst"></span><a href="${esc(href)}">Открыть канал на YouTube</a></div><div class="vg${v.kind === 's' ? ' sh' : ''}"></div><div class="empty" id="vmsg">${v.kind === 's' ? 'Загружаю Shorts канала…' : 'Загружаю видео канала…'}</div><div class="nrow"><button data-a="more" id="vmore" hidden>Загрузить ещё</button></div>`);
     loadChannel(v);
   }
 
@@ -653,7 +676,7 @@ section{padding:12px 16px;overflow:auto}
       `<div class="row ${sel === f.id ? 'on' : ''}" data-id="${f.id}" data-drop="${f.id}" style="padding-left:${12 + d * 22}px">` +
       (ed === f.id
         ? `<input class="ri" value="${esc(f.name)}">`
-        : `<span class="n"><span class="ic">📁</span> ${esc(f.name)}</span><span class="c">${count(f.id)}</span><span class="act"><button data-a="rf" title="Переименовать">✎</button><button data-a="df" title="Удалить папку">✕</button></span>`) +
+        : `<span class="n"><span class="ic">📁</span> ${esc(f.name)}</span><span class="c">${count(f.id)}</span>${newBadge(f.id)}<span class="act"><button data-a="rf" title="Переименовать">✎</button><button data-a="df" title="Удалить папку">✕</button></span>`) +
       `</div>` + tree(f.id, d + 1)).join('');
   }
 
@@ -676,8 +699,13 @@ section{padding:12px 16px;overflow:auto}
   function renderTools() {
     let h = '';
     if (mode === 'c') {
-      if (fol(sel)) h += '<button data-a="ff">🔎 Показывать в ленте подписок только эту папку</button>';
-      if (S.feedFilter && fol(S.feedFilter)) h += `<span class="m">Фильтр ленты: ${esc(path(S.feedFilter))}</span><button data-a="fx">Снять фильтр</button>`;
+      h += `<div class="seg"><button data-a="cv" data-k="ch" class="${cview === 'ch' ? 'on' : ''}">Каналы</button><button data-a="cv" data-k="new" class="${cview === 'new' ? 'on' : ''}">Новые видео</button></div>`;
+      if (cview === 'new') {
+        h += '<div class="seg">' + [['all', 'Все'], ['v', 'Видео'], ['s', 'Shorts']].map((x) => `<button data-a="fk" data-k="${x[0]}" class="${fkind === x[0] ? 'on' : ''}">${x[1]}</button>`).join('') + '</div><button data-a="fref">↻ Обновить</button><button data-a="fseen">✓ Отметить просмотренным</button>';
+      } else {
+        if (fol(sel)) h += '<button data-a="ff">🔎 Показывать в ленте YouTube только эту папку</button>';
+        if (S.feedFilter && fol(S.feedFilter)) h += `<span class="m">Фильтр ленты: ${esc(path(S.feedFilter))}</span><button data-a="fx">Снять фильтр</button>`;
+      }
     } else if (mode === 'n') {
       h = isVideo() ? '<button class="pri" data-a="nnew">➕ Заметка к текущему видео</button>' : '<span class="m">Откройте видео и наведите мышь на правый нижний угол: появится кнопка «📝 Заметка».</span>';
     }
@@ -715,9 +743,141 @@ section{padding:12px 16px;overflow:auto}
       : `<div class="empty">${Object.keys(S.notes).length ? 'Ничего не найдено.' : 'Заметок пока нет. Откройте видео, наведите мышь на правый нижний угол и нажмите «📝 Заметка».'}</div>`);
   }
 
+  // ---------- новые видео каналов (RSS) ----------
+  const relTime = (ts) => {
+    const d = (Date.now() - ts) / 1000, rtf = new Intl.RelativeTimeFormat('ru', { numeric: 'auto' });
+    if (d < 3600) return rtf.format(-Math.max(1, Math.round(d / 60)), 'minute');
+    if (d < 86400) return rtf.format(-Math.round(d / 3600), 'hour');
+    if (d < 86400 * 30) return rtf.format(-Math.round(d / 86400), 'day');
+    if (d < 86400 * 365) return rtf.format(-Math.round(d / 86400 / 30), 'month');
+    return rtf.format(-Math.round(d / 86400 / 365), 'year');
+  };
+  const fmtViews = (n) => (n >= 1e6 ? (n / 1e6).toFixed(1).replace('.0', '') + ' млн' : n >= 1e3 ? Math.round(n / 1e3) + ' тыс.' : String(n)) + ' просмотров';
+
+  function parseRss(xml) {
+    const dec = (x) => x.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'").replace(/&amp;/g, '&');
+    const out = [], re = /<entry>([\s\S]*?)<\/entry>/g;
+    let m;
+    while ((m = re.exec(xml))) {
+      const e = m[1];
+      const id = (e.match(/<yt:videoId>([^<]+)<\/yt:videoId>/) || [])[1];
+      const t = (e.match(/<title>([\s\S]*?)<\/title>/) || [])[1];
+      const p = (e.match(/<published>([^<]+)<\/published>/) || [])[1];
+      const v = (e.match(/<media:statistics views="(\d+)"/) || [])[1];
+      if (id && p) out.push({ id, t: dec(t || ''), p: Date.parse(p), v: v ? +v : 0 });
+    }
+    return out;
+  }
+
+  async function resolveChannelId(ch) {
+    if (!ch.h) return '';
+    const html = await (await fetch('/' + ch.h + '?hl=ru')).text();
+    const m = html.match(/"externalId":"(UC[\w-]{22})"/) || html.match(/"channelId":"(UC[\w-]{22})"/);
+    return m ? m[1] : '';
+  }
+
+  // идентификаторы Shorts канала: по ним отличаем Shorts от обычных видео
+  async function shortsSet(ch) {
+    try {
+      const html = await (await fetch((ch.h ? '/' + ch.h : '/channel/' + ch.c) + '/shorts?hl=ru')).text();
+      const ids = new Set(), re = /"videoId":"([\w-]{11})"/g;
+      let m;
+      while ((m = re.exec(html))) ids.add(m[1]);
+      return ids;
+    } catch (e) { return null; }
+  }
+
+  async function fetchChannelFeed(ch) {
+    if (!ch.c) { ch.c = await resolveChannelId(ch); if (!ch.c) throw new Error('нет id канала'); }
+    const xml = await (await fetch('/feeds/videos.xml?channel_id=' + encodeURIComponent(ch.c))).text();
+    const items = parseRss(xml);
+    const unk = items.filter((it) => !S.vcls[it.id]);
+    if (unk.length) {
+      const sh = await shortsSet(ch);
+      if (sh) unk.forEach((it) => { S.vcls[it.id] = sh.has(it.id) ? 's' : 'v'; });
+    }
+    items.forEach((it) => { it.s = S.vcls[it.id] === 's'; });
+    S.feed[ch.c] = { ts: Date.now(), items };
+    const ks = Object.keys(S.vcls);
+    if (ks.length > 6000) ks.slice(0, 1500).forEach((k) => { delete S.vcls[k]; });
+  }
+
+  let feedBusy = false;
+  const feedTry = new Map();
+  async function loadFeed(chs, force) {
+    if (feedBusy) return;
+    const now = Date.now();
+    const todo = chs.filter((ch) => {
+      const e = ch.c && S.feed[ch.c];
+      if (!force && e && now - e.ts < 30 * 60000) return false;
+      if (!force && feedTry.has(ch.id) && now - feedTry.get(ch.id) < 5 * 60000) return false;
+      return true;
+    });
+    if (!todo.length) return;
+    feedBusy = true;
+    let done = 0;
+    const queue = todo.slice();
+    const worker = async () => {
+      while (queue.length) {
+        const ch = queue.shift();
+        feedTry.set(ch.id, Date.now());
+        try { await fetchChannelFeed(ch); } catch (e) {}
+        done++;
+        $('#st').textContent = 'Загружаю каналы: ' + done + '/' + todo.length;
+        if (done % 10 === 0) save();
+        if (done % 6 === 0 && open && mode === 'c' && cview === 'new' && !view) render();
+      }
+    };
+    await Promise.all([worker(), worker(), worker()]);
+    feedBusy = false;
+    save();
+    $('#st').textContent = '';
+    if (open && mode === 'c' && cview === 'new' && !view) render();
+  }
+
+  function feedChans() {
+    if (sel === 'none') return S.chans.filter((c) => !c.f);
+    if (fol(sel)) { const s = ids(sel); return S.chans.filter((c) => s.includes(c.f)); }
+    return S.chans;
+  }
+  const seenOf = (key) => (S.seen[key] === undefined ? Date.now() - 48 * 3600 * 1000 : S.seen[key]);
+  function newCount(fid) {
+    const seen = seenOf(fid), s = ids(fid);
+    let n = 0;
+    S.chans.filter((c) => s.includes(c.f)).forEach((ch) => { const e = ch.c && S.feed[ch.c]; if (e) e.items.forEach((it) => { if (it.p > seen) n++; }); });
+    return n;
+  }
+  const newBadge = (fid) => { if (mode !== 'c' || cview !== 'new') return ''; const n = newCount(fid); return n ? `<span class="nb2">+${n}</span>` : ''; };
+
+  function feedCard(it, seen) {
+    const href = it.s ? '/shorts/' + it.id : '/watch?v=' + it.id;
+    const meta = [relTime(it.p), it.v ? fmtViews(it.v) : ''].filter(Boolean).join(' · ');
+    return `<a class="vc" href="${href}"><div class="th"><img loading="lazy" src="https://i.ytimg.com/vi/${it.id}/mqdefault.jpg" alt="">${it.p > seen ? '<span class="newt">NEW</span>' : ''}</div><div class="vt">${esc(it.t)}</div><div class="m">${esc(it.ch.t)}</div><div class="m">${esc(meta)}</div></a>`;
+  }
+
+  function renderFeed() {
+    if (!S.chans.length) { setHtml($('#cards'), '<div class="empty">Сначала загрузите подписки: вкладка «Каналы», кнопка «Обновить подписки».</div>'); return; }
+    const chs = feedChans(), seen = seenOf(sel);
+    let items = [];
+    chs.forEach((ch) => { const e = ch.c && S.feed[ch.c]; if (e) e.items.forEach((it) => items.push(Object.assign({ ch }, it))); });
+    if (fkind === 'v') items = items.filter((it) => !it.s); else if (fkind === 's') items = items.filter((it) => it.s);
+    if (q) items = items.filter((it) => (it.t + ' ' + it.ch.t).toLowerCase().includes(q));
+    items.sort((a, b) => b.p - a.p);
+    const total = items.length;
+    items = items.slice(0, 400);
+    const loaded = chs.filter((c) => c.c && S.feed[c.c]).length;
+    setHtml($('#cards'), (total ? `<div class="vg${fkind === 's' ? ' sh' : ''}">` + items.map((it) => feedCard(it, seen)).join('') + '</div>'
+      : `<div class="empty">${loaded < chs.length ? 'Загружаю новые видео…' : 'Новых видео нет.'}</div>`) +
+      (chs.length ? `<div class="m" style="margin-top:12px">Каналов: ${loaded}/${chs.length}. Показываются последние загрузки каждого канала (до 15), новые с момента последней отметки помечены NEW.</div>` : ''));
+    if (loaded < chs.length || chs.some((c) => c.c && S.feed[c.c] && Date.now() - S.feed[c.c].ts > 30 * 60000)) loadFeed(chs, false);
+  }
+
+  const applySb = () => $('#pn').classList.toggle('nosb', !!S.noSb);
+
   const focusRi = () => { const i = root.querySelector('.ri'); if (i) { i.focus(); i.select(); } };
 
   function render() {
+    applySb();
     if (mode !== 'n' && sel !== 'all' && sel !== 'none' && !fol(sel)) sel = 'all';
     root.querySelectorAll('#tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === mode));
     renderSide();
@@ -728,7 +888,7 @@ section{padding:12px 16px;overflow:auto}
     if ((mode !== 'n' && view) || (mode === 'n' && ne)) { $('#q').hidden = true; $('#tools').hidden = true; focusRi(); return; }
     $('#q').hidden = false;
     renderTools();
-    if (mode === 'p') renderLists(); else if (mode === 'c') renderChans(); else renderNotes();
+    if (mode === 'p') renderLists(); else if (mode === 'c') { if (cview === 'new') renderFeed(); else renderChans(); } else renderNotes();
     root.querySelectorAll('.pv[data-need]').forEach((e) => pvObs.observe(e));
     focusRi();
   }
@@ -792,6 +952,11 @@ section{padding:12px 16px;overflow:auto}
     else if (a === 'more') { const v = view; if (!v || !v.token) return; b.hidden = true; v.done = false; pump(v, v.items.length + 200).catch(() => {}).then(() => finishChannel(v, false, [])); }
     else if (a === 'ff') { S.feedFilter = sel; save(); applyFeedFilter(); render(); $('#st').textContent = 'Откройте «Подписки» на YouTube: лента покажет только эту папку'; }
     else if (a === 'fx') { S.feedFilter = null; save(); applyFeedFilter(); render(); sync(); }
+    else if (a === 'cv') { cview = b.dataset.k; render(); }
+    else if (a === 'fk') { fkind = b.dataset.k; render(); }
+    else if (a === 'fref') { loadFeed(feedChans(), true); }
+    else if (a === 'fseen') { S.seen[sel] = Date.now(); save(); render(); }
+    else if (a === 'ckind') { if (view && view.ch) openChannelView(view.ch, b.dataset.k); }
     else if (a === 'nnew') { const i = videoInfo(); if (i) { const ex = S.notes[i.id]; openEditor({ id: i.id, t: i.t || i.id, c: i.c, tags: ex ? ex.tags || [] : [], text: ex ? ex.text || '' : '' }); } }
     else if (a === 'nedit') { const nid = b.dataset.nid, n = S.notes[nid]; if (n) openEditor({ id: nid, t: n.t, c: n.c, tags: n.tags || [], text: n.text || '' }); }
     else if (a === 'nback') { ne = null; render(); }
@@ -816,6 +981,7 @@ section{padding:12px 16px;overflow:auto}
     if (t.id === 'fab' || t.id === 'zone') return toggle(true);
     if (t.id === 'nbtn') return openNoteFromPage();
     if (t.id === 'x') return toggle(false);
+    if (t.id === 'sbt') { S.noSb = !S.noSb; save(); applySb(); return; }
     if (t.id === 'ov') { if (!(mode === 'n' && ne)) toggle(false); return; }
     if (t.id === 'rs') return refresh();
     if (t.id === 'nfb') return newFolder();
@@ -918,6 +1084,7 @@ section{padding:12px 16px;overflow:auto}
     loaded = true;
     if (!S.chans) S.chans = [];
     if (!S.notes) S.notes = {};
+    S.feed = S.feed || {}; S.vcls = S.vcls || {}; S.seen = S.seen || {};
     render();
     sync();
     if (isPL()) setTimeout(scan, 1500);
